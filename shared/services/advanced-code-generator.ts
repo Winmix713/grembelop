@@ -1,243 +1,227 @@
-import { 
-  FigmaNode, 
-  FigmaApiResponse, 
-  GeneratedComponent, 
-  GenerationConfig, 
-  ComponentMetadata, 
-  AccessibilityReport, 
-  ResponsiveBreakpoints,
-  AccessibilityIssue
-} from '../types/figma';
+import { FigmaNode, FigmaApiResponse, GeneratedComponent, ComponentMetadata, AccessibilityReport, ResponsiveBreakpoints } from '../types/figma';
 
-interface ComponentAnalysis {
-  type: 'button' | 'card' | 'text' | 'input' | 'layout' | 'complex';
-  complexity: 'simple' | 'medium' | 'complex';
-  hasInteractivity: boolean;
-  hasVariants: boolean;
-  childComponents: ComponentAnalysis[];
+export interface CodeGenerationOptions {
+  framework: 'react' | 'vue' | 'html';
+  styling: 'tailwind' | 'css-modules' | 'styled-components' | 'plain-css';
+  typescript: boolean;
+  accessibility: boolean;
+  responsive: boolean;
+  optimizeImages: boolean;
 }
 
-interface StyleProperties {
-  width?: string;
-  height?: string;
-  backgroundColor?: string;
-  color?: string;
-  fontSize?: string;
-  fontFamily?: string;
-  fontWeight?: string;
-  lineHeight?: string;
-  letterSpacing?: string;
-  margin?: string;
-  padding?: string;
-  borderRadius?: string;
-  border?: string;
-  boxShadow?: string;
-  display?: string;
-  flexDirection?: string;
-  alignItems?: string;
-  justifyContent?: string;
-  gap?: string;
-  position?: string;
-  top?: string;
-  left?: string;
-  right?: string;
-  bottom?: string;
-  zIndex?: string;
-  opacity?: string;
-  transform?: string;
-  transition?: string;
+export interface CustomCodeInputs {
+  jsx: string;
+  css: string;
+  cssAdvanced: string;
 }
 
 export class AdvancedCodeGenerator {
-  private config: GenerationConfig;
-  private dependencies: Set<string> = new Set();
+  private figmaData: FigmaApiResponse;
+  private options: CodeGenerationOptions;
+  private customCode: CustomCodeInputs = { jsx: '', css: '', cssAdvanced: '' };
 
-  constructor(config: GenerationConfig) {
-    this.config = config;
+  constructor(figmaData: FigmaApiResponse, options: CodeGenerationOptions) {
+    this.figmaData = figmaData;
+    this.options = options;
   }
 
-  async generateComponent(
-    figmaData: FigmaApiResponse,
-    nodeId?: string,
-    customCode?: {
-      jsx?: string;
-      css?: string;
-      cssAdvanced?: string;
-      imports?: string;
-      utilities?: string;
-    }
-  ): Promise<GeneratedComponent> {
-    const startTime = Date.now();
+  // Egyéni kód beállítása
+  setCustomCode(customCode: CustomCodeInputs) {
+    this.customCode = customCode;
+  }
 
-    // Find the target node or use document root
-    const targetNode = nodeId 
-      ? this.findNodeById(figmaData.document, nodeId)
-      : figmaData.document.children?.[0]; // Use first canvas
-
-    if (!targetNode) {
-      throw new Error('Target node not found');
-    }
-
-    // Analyze component structure
-    const analysis = this.analyzeComponent(targetNode);
-
-    // Generate component name
-    const componentName = this.generateComponentName(targetNode.name);
-
-    // Generate styles
-    const styles = this.generateStyles(targetNode);
-
-    // Generate base JSX/HTML
-    let jsx = await this.generateJSX(targetNode, analysis);
-    let css = this.generateCSS(targetNode, styles);
-    const tailwind = this.config.styling === 'tailwind' ? this.generateTailwind(targetNode, styles) : undefined;
-    let typescript = this.config.typescript ? this.generateTypeScript(analysis) : undefined;
-
-    // Integrate custom code if provided
-    if (customCode) {
-      jsx = this.integrateCustomJSX(jsx, customCode.jsx, customCode.imports);
-      css = this.integrateCustomCSS(css, customCode.css, customCode.cssAdvanced);
-      if (typescript && customCode.utilities) {
-        typescript = this.integrateCustomUtilities(typescript, customCode.utilities);
+  // Fő generálási metódus
+  generateComponents(): GeneratedComponent[] {
+    const components: GeneratedComponent[] = [];
+    
+    // Komponensek generálása
+    Object.entries(this.figmaData.components || {}).forEach(([key, component]) => {
+      const node = this.findNodeById(component.key);
+      if (node) {
+        const generatedComponent = this.generateSingleComponent(node, component.name);
+        components.push(generatedComponent);
       }
+    });
+
+    // Ha nincsenek komponensek, generáljuk a fő frame-eket
+    if (components.length === 0) {
+      this.findMainFrames(this.figmaData.document).forEach(frame => {
+        const generatedComponent = this.generateSingleComponent(frame, frame.name);
+        components.push(generatedComponent);
+      });
     }
 
-    // Generate accessibility report
-    const accessibility = this.generateAccessibilityReport(targetNode, jsx);
+    return components;
+  }
 
-    // Generate responsive breakpoints
-    const responsive = this.generateResponsiveBreakpoints(targetNode, styles);
-
-    // Create metadata with proper defaults
-    const metadata: ComponentMetadata = {
-      figmaNodeId: targetNode.id,
-      componentType: analysis.type,
-      complexity: analysis.complexity,
-      estimatedAccuracy: this.calculateAccuracy(analysis),
-      generationTime: Date.now() - startTime,
-      dependencies: Array.from(this.dependencies),
-      suggestedProps: this.generateSuggestedProps(analysis),
-      warnings: this.generateWarnings(analysis, customCode)
-    };
+  private generateSingleComponent(node: FigmaNode, componentName: string): GeneratedComponent {
+    const startTime = Date.now();
+    
+    const sanitizedName = this.sanitizeComponentName(componentName);
+    const jsx = this.generateJSX(node, sanitizedName);
+    const css = this.generateCSS(node, sanitizedName);
+    const accessibility = this.analyzeAccessibility(node);
+    const responsive = this.analyzeResponsive(node);
+    const metadata = this.generateMetadata(node, Date.now() - startTime);
 
     return {
-      id: `component_${Date.now()}`,
-      name: componentName,
+      id: node.id,
+      name: sanitizedName,
       jsx,
       css,
-      tailwind,
-      typescript,
+      ...(this.options.typescript && { typescript: this.generateTypeScript(node, sanitizedName) }),
       accessibility,
       responsive,
-      metadata
+      metadata,
     };
   }
 
-  private findNodeById(node: FigmaNode, id: string): FigmaNode | null {
-    if (node.id === id) return node;
+  // JSX generálás fejlett logikával + egyéni kód
+  private generateJSX(node: FigmaNode, componentName: string): string {
+    const props = this.extractProps(node);
+    const children = this.generateChildren(node);
+    const className = this.generateClassName(node);
+    const styles = this.generateInlineStyles(node);
 
-    if (node.children) {
-      for (const child of node.children) {
-        const found = this.findNodeById(child, id);
-        if (found) return found;
+    if (this.options.framework === 'react') {
+      const imports = this.generateImports(node);
+      const propsInterface = this.options.typescript ? this.generatePropsInterface(props, componentName) : '';
+      const componentSignature = this.options.typescript 
+        ? `export const ${componentName}: React.FC<${componentName}Props> = ({ ${props.map(p => p.name).join(', ')} })`
+        : `export const ${componentName} = ({ ${props.map(p => p.name).join(', ')} })`;
+
+      // Egyéni JSX kód beépítése
+      const customJSXSection = this.customCode.jsx ? `
+  // === EGYÉNI JSX KÓD ===
+  ${this.customCode.jsx}
+  // === EGYÉNI JSX KÓD VÉGE ===
+` : '';
+
+      return `${imports}
+${propsInterface}
+${componentSignature} => {${customJSXSection}
+  return (
+    ${this.generateJSXElement(node, className, styles, children, 1)}
+  );
+};
+
+export default ${componentName};`;
+    }
+
+    // HTML generálás
+    if (this.options.framework === 'html') {
+      return this.generateHTML(node, className, styles, children);
+    }
+
+    return jsx;
+  }
+
+  private generateJSXElement(node: FigmaNode, className: string, styles: string, children: string, depth: number): string {
+    const indent = '  '.repeat(depth);
+    const tag = this.getHtmlTag(node);
+    const attributes = this.generateAttributes(node);
+    
+    if (node.type === 'TEXT' && node.characters) {
+      return `${indent}<${tag}${className ? ` className="${className}"` : ''}${styles ? ` style={${styles}}` : ''}${attributes}>
+${indent}  {${node.characters ? `"${node.characters}"` : 'children'}}
+${indent}</${tag}>`;
+    }
+
+    if (children) {
+      return `${indent}<${tag}${className ? ` className="${className}"` : ''}${styles ? ` style={${styles}}` : ''}${attributes}>
+${children}
+${indent}</${tag}>`;
+    }
+
+    return `${indent}<${tag}${className ? ` className="${className}"` : ''}${styles ? ` style={${styles}}` : ''}${attributes} />`;
+  }
+
+  private generateChildren(node: FigmaNode): string {
+    if (!node.children || node.children.length === 0) return '';
+    
+    return node.children
+      .map(child => {
+        const childClassName = this.generateClassName(child);
+        const childStyles = this.generateInlineStyles(child);
+        const grandChildren = this.generateChildren(child);
+        return this.generateJSXElement(child, childClassName, childStyles, grandChildren, 2);
+      })
+      .join('\n');
+  }
+
+  // CSS generálás fejlett logikával + egyéni CSS
+  private generateCSS(node: FigmaNode, componentName: string): string {
+    let baseCSS = '';
+    
+    if (this.options.styling === 'tailwind') {
+      baseCSS = this.generateTailwindCSS(node);
+    } else {
+      const styles = this.extractAllStyles(node);
+      const cssRules = this.convertToCSSRules(styles, componentName);
+      
+      if (this.options.styling === 'css-modules') {
+        baseCSS = this.generateCSSModules(cssRules);
+      } else if (this.options.styling === 'styled-components') {
+        baseCSS = this.generateStyledComponents(cssRules, componentName);
+      } else {
+        baseCSS = this.generatePlainCSS(cssRules, componentName);
       }
     }
 
-    return null;
+    // Egyéni CSS hozzáadása
+    const customCSSSection = this.customCode.css ? `
+
+/* === EGYÉNI CSS STÍLUSOK === */
+${this.customCode.css}
+/* === EGYÉNI CSS STÍLUSOK VÉGE === */` : '';
+
+    // Fejlett CSS++ hozzáadása
+    const advancedCSSSection = this.customCode.cssAdvanced ? `
+
+/* === FEJLETT CSS++ FUNKCIÓK === */
+${this.customCode.cssAdvanced}
+/* === FEJLETT CSS++ FUNKCIÓK VÉGE === */` : '';
+
+    return `${baseCSS}${customCSSSection}${advancedCSSSection}`;
   }
 
-  private analyzeComponent(node: FigmaNode): ComponentAnalysis {
-    const type = this.determineComponentType(node);
-    const complexity = this.determineComplexity(node);
-    const hasInteractivity = this.hasInteractiveElements(node);
-    const hasVariants = this.hasComponentVariants(node);
+  private extractAllStyles(node: FigmaNode): Record<string, any> {
+    const styles: Record<string, any> = {};
 
-    const childComponents: ComponentAnalysis[] = [];
-    if (node.children) {
-      for (const child of node.children) {
-        childComponents.push(this.analyzeComponent(child));
-      }
-    }
-
-    return {
-      type,
-      complexity,
-      hasInteractivity,
-      hasVariants,
-      childComponents
-    };
-  }
-
-  private determineComponentType(node: FigmaNode): ComponentAnalysis['type'] {
-    const name = node.name.toLowerCase();
-
-    if (name.includes('button') || name.includes('btn')) return 'button';
-    if (name.includes('card') || name.includes('panel')) return 'card';
-    if (name.includes('input') || name.includes('field') || name.includes('form')) return 'input';
-    if (node.type === 'TEXT') return 'text';
-    if (node.children && node.children.length > 3) return 'layout';
-
-    return 'complex';
-  }
-
-  private determineComplexity(node: FigmaNode): ComponentAnalysis['complexity'] {
-    const childCount = node.children?.length || 0;
-    const hasEffects = (node.effects?.length || 0) > 0;
-    const hasConstraints = node.constraints !== undefined;
-
-    if (childCount === 0 && !hasEffects) return 'simple';
-    if (childCount <= 3 && !hasEffects) return 'medium';
-
-    return 'complex';
-  }
-
-  private hasInteractiveElements(node: FigmaNode): boolean {
-    const name = node.name.toLowerCase();
-    const interactiveTypes = ['button', 'input', 'select', 'checkbox', 'radio', 'toggle'];
-
-    if (interactiveTypes.some(type => name.includes(type))) return true;
-
-    if (node.children) {
-      return node.children.some(child => this.hasInteractiveElements(child));
-    }
-
-    return false;
-  }
-
-  private hasComponentVariants(node: FigmaNode): boolean {
-    return node.type === 'COMPONENT_SET' || node.type === 'INSTANCE';
-  }
-
-  private generateComponentName(figmaName: string): string {
-    // Convert Figma name to valid component name
-    return figmaName
-      .replace(/[^a-zA-Z0-9]/g, ' ')
-      .split(' ')
-      .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-      .join('')
-      .replace(/^\d/, 'Component$&'); // Prefix with Component if starts with number
-  }
-
-  private generateStyles(node: FigmaNode): StyleProperties {
-    const styles: StyleProperties = {};
-
-    // Dimensions
+    // Layout és pozíció
     if (node.absoluteBoundingBox) {
-      styles.width = `${node.absoluteBoundingBox.width}px`;
-      styles.height = `${node.absoluteBoundingBox.height}px`;
+      const { width, height } = node.absoluteBoundingBox;
+      styles.width = `${width}px`;
+      styles.height = `${height}px`;
     }
 
-    // Background
+    // Flexbox layout
+    if (node.layoutMode) {
+      styles.display = 'flex';
+      styles.flexDirection = node.layoutMode === 'HORIZONTAL' ? 'row' : 'column';
+      
+      if (node.itemSpacing) {
+        styles.gap = `${node.itemSpacing}px`;
+      }
+    }
+
+    // Padding
+    if (node.paddingLeft || node.paddingRight || node.paddingTop || node.paddingBottom) {
+      styles.padding = `${node.paddingTop || 0}px ${node.paddingRight || 0}px ${node.paddingBottom || 0}px ${node.paddingLeft || 0}px`;
+    }
+
+    // Háttérszín
     if (node.backgroundColor) {
-      const { r, g, b, a = 1 } = node.backgroundColor;
-      styles.backgroundColor = `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${a})`;
+      styles.backgroundColor = this.colorToCSS(node.backgroundColor);
     }
 
+    // Fills (háttér, gradientek)
     if (node.fills && node.fills.length > 0) {
       const fill = node.fills[0];
-      if (fill.color) {
-        const { r, g, b, a = 1 } = fill.color;
-        styles.backgroundColor = `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${a})`;
+      if (fill.type === 'SOLID' && fill.color) {
+        styles.backgroundColor = this.colorToCSS(fill.color, fill.opacity);
+      } else if (fill.type === 'GRADIENT_LINEAR') {
+        styles.background = this.gradientToCSS(fill);
       }
     }
 
@@ -246,66 +230,40 @@ export class AdvancedCodeGenerator {
       styles.borderRadius = `${node.cornerRadius}px`;
     }
 
-    // Typography
-    if (node.style) {
-      styles.fontFamily = node.style.fontFamily;
+    // Strokes (border)
+    if (node.strokes && node.strokes.length > 0 && node.strokeWeight) {
+      const stroke = node.strokes[0];
+      if (stroke.color) {
+        styles.border = `${node.strokeWeight}px solid ${this.colorToCSS(stroke.color, stroke.opacity)}`;
+      }
+    }
+
+    // Text stílusok
+    if (node.type === 'TEXT' && node.style) {
+      styles.fontFamily = `"${node.style.fontFamily}", sans-serif`;
       styles.fontSize = `${node.style.fontSize}px`;
-      styles.fontWeight = 'normal'; // Default weight, can be enhanced based on font family analysis
       styles.lineHeight = `${node.style.lineHeightPx}px`;
       styles.letterSpacing = `${node.style.letterSpacing}px`;
-
+      
       if (node.style.fills && node.style.fills.length > 0) {
-        const fill = node.style.fills[0];
-        if (fill.color) {
-          const { r, g, b, a = 1 } = fill.color;
-          styles.color = `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${a})`;
+        const textFill = node.style.fills[0];
+        if (textFill.color) {
+          styles.color = this.colorToCSS(textFill.color, textFill.opacity);
         }
       }
     }
 
-    // Layout
-    if (node.layoutMode) {
-      styles.display = 'flex';
-      styles.flexDirection = node.layoutMode === 'HORIZONTAL' ? 'row' : 'column';
-
-      if (node.itemSpacing) {
-        styles.gap = `${node.itemSpacing}px`;
-      }
+    // Opacity
+    if (node.opacity !== undefined && node.opacity !== 1) {
+      styles.opacity = node.opacity;
     }
 
-    // Padding
-    if (node.paddingLeft || node.paddingRight || node.paddingTop || node.paddingBottom) {
-      const top = node.paddingTop || 0;
-      const right = node.paddingRight || 0;
-      const bottom = node.paddingBottom || 0;
-      const left = node.paddingLeft || 0;
-
-      if (top === right && right === bottom && bottom === left) {
-        styles.padding = `${top}px`;
-      } else {
-        styles.padding = `${top}px ${right}px ${bottom}px ${left}px`;
-      }
-    }
-
-    // Effects (shadows)
+    // Effects (shadows, blur)
     if (node.effects && node.effects.length > 0) {
       const shadows = node.effects
         .filter(effect => effect.type === 'DROP_SHADOW' && effect.visible !== false)
-        .map(effect => {
-          const offsetX = effect.offset?.x || 0;
-          const offsetY = effect.offset?.y || 0;
-          const radius = effect.radius || 0;
-          const spread = effect.spread || 0;
-
-          if (effect.color) {
-            const { r, g, b, a = 1 } = effect.color;
-            const color = `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${a})`;
-            return `${offsetX}px ${offsetY}px ${radius}px ${spread}px ${color}`;
-          }
-
-          return `${offsetX}px ${offsetY}px ${radius}px ${spread}px rgba(0, 0, 0, 0.1)`;
-        });
-
+        .map(effect => this.effectToCSS(effect));
+      
       if (shadows.length > 0) {
         styles.boxShadow = shadows.join(', ');
       }
@@ -314,511 +272,452 @@ export class AdvancedCodeGenerator {
     return styles;
   }
 
-  private async generateJSX(node: FigmaNode, analysis: ComponentAnalysis): Promise<string> {
-    const componentName = this.generateComponentName(node.name);
+  private generateTailwindCSS(node: FigmaNode): string {
+    const classes = this.generateTailwindClasses(node);
+    return `/* Figma alapú Tailwind osztályok: ${classes} */
 
-    if (this.config.framework === 'react') {
-      return this.generateReactJSX(node, analysis, componentName);
-    } else if (this.config.framework === 'vue') {
-      return this.generateVueTemplate(node, analysis, componentName);
-    } else {
-      return this.generateHTML(node, analysis, componentName);
-    }
-  }
-
-  private generateReactJSX(node: FigmaNode, analysis: ComponentAnalysis, componentName: string): string {
-    const props = this.generateReactProps(analysis);
-    const className = this.config.styling === 'tailwind' ? this.generateTailwindClasses(node) : 'component-styles';
-
-    let jsx = '';
-
-    if (this.config.typescript) {
-      jsx += `interface ${componentName}Props {\n${props.join('\n')}\n}\n\n`;
-    }
-
-    jsx += `${this.config.typescript ? 'const' : 'function'} ${componentName}${this.config.typescript ? ': React.FC<' + componentName + 'Props>' : ''} = (${this.config.typescript ? '{ ...props }' : 'props'}) => {\n`;
-    jsx += `  return (\n`;
-    jsx += `    ${this.generateReactElement(node, className, 4)}\n`;
-    jsx += `  );\n`;
-    jsx += `};\n\n`;
-    jsx += `export default ${componentName};`;
-
-    // Add dependencies
-    this.dependencies.add('react');
-    if (this.config.typescript) {
-      this.dependencies.add('@types/react');
-    }
-
-    return jsx;
-  }
-
-  private generateReactElement(node: FigmaNode, className: string, indent: number): string {
-    const indentStr = ' '.repeat(indent);
-    const tag = this.getHTMLTag(node);
-
-    let element = `${indentStr}<${tag}`;
-
-    if (className) {
-      element += ` className="${className}"`;
-    }
-
-    // Add accessibility attributes
-    if (node.name.toLowerCase().includes('button')) {
-      element += ` role="button" tabIndex={0}`;
-    }
-
-    if (node.type === 'TEXT' && node.characters) {
-      element += `>${node.characters}</${tag}>`;
-    } else if (node.children && node.children.length > 0) {
-      element += `>\n`;
-
-      for (const child of node.children) {
-        element += this.generateReactElement(child, '', indent + 2) + '\n';
-      }
-
-      element += `${indentStr}</${tag}>`;
-    } else {
-      element += ` />`;
-    }
-
-    return element;
-  }
-
-  private generateVueTemplate(node: FigmaNode, analysis: ComponentAnalysis, componentName: string): string {
-    const template = this.generateVueElement(node, '', 2);
-
-    return `<template>\n${template}\n</template>\n\n<script>\nexport default {\n  name: '${componentName}',\n  props: {\n    // Add props here\n  }\n};\n</script>\n\n<style scoped>\n/* Component styles */\n</style>`;
-  }
-
-  private generateVueElement(node: FigmaNode, className: string, indent: number): string {
-    const indentStr = ' '.repeat(indent);
-    const tag = this.getHTMLTag(node);
-
-    let element = `${indentStr}<${tag}`;
-
-    if (className) {
-      element += ` class="${className}"`;
-    }
-
-    if (node.type === 'TEXT' && node.characters) {
-      element += `>${node.characters}</${tag}>`;
-    } else if (node.children && node.children.length > 0) {
-      element += `>\n`;
-
-      for (const child of node.children) {
-        element += this.generateVueElement(child, '', indent + 2) + '\n';
-      }
-
-      element += `${indentStr}</${tag}>`;
-    } else {
-      element += ` />`;
-    }
-
-    return element;
-  }
-
-  private generateHTML(node: FigmaNode, analysis: ComponentAnalysis, componentName: string): string {
-    const element = this.generateHTMLElement(node, 'component-styles', 0);
-
-    return `<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n  <title>${componentName}</title>\n  <link rel="stylesheet" href="styles.css">\n</head>\n<body>\n${element}\n</body>\n</html>`;
-  }
-
-  private generateHTMLElement(node: FigmaNode, className: string, indent: number): string {
-    const indentStr = ' '.repeat(indent);
-    const tag = this.getHTMLTag(node);
-
-    let element = `${indentStr}<${tag}`;
-
-    if (className) {
-      element += ` class="${className}"`;
-    }
-
-    if (node.type === 'TEXT' && node.characters) {
-      element += `>${node.characters}</${tag}>`;
-    } else if (node.children && node.children.length > 0) {
-      element += `>\n`;
-
-      for (const child of node.children) {
-        element += this.generateHTMLElement(child, '', indent + 2) + '\n';
-      }
-
-      element += `${indentStr}</${tag}>`;
-    } else {
-      element += ` />`;
-    }
-
-    return element;
-  }
-
-  private getHTMLTag(node: FigmaNode): string {
-    const name = node.name.toLowerCase();
-
-    if (name.includes('button')) return 'button';
-    if (name.includes('input')) return 'input';
-    if (name.includes('header')) return 'header';
-    if (name.includes('footer')) return 'footer';
-    if (name.includes('nav')) return 'nav';
-    if (node.type === 'TEXT') return 'span';
-    if (node.layoutMode) return 'div';
-
-    return 'div';
-  }
-
-  private generateReactProps(analysis: ComponentAnalysis): string[] {
-    const props: string[] = [];
-
-    if (analysis.hasInteractivity) {
-      props.push('  onClick?: () => void;');
-    }
-
-    if (analysis.type === 'button') {
-      props.push('  disabled?: boolean;');
-      props.push('  variant?: "primary" | "secondary" | "outline";');
-    }
-
-    if (analysis.type === 'input') {
-      props.push('  value?: string;');
-      props.push('  onChange?: (value: string) => void;');
-      props.push('  placeholder?: string;');
-    }
-
-    props.push('  className?: string;');
-
-    return props;
-  }
-
-  private generateCSS(node: FigmaNode, styles: StyleProperties): string {
-    let css = '.component-styles {\n';
-
-    for (const [property, value] of Object.entries(styles)) {
-      if (value) {
-        const cssProperty = property.replace(/([A-Z])/g, '-$1').toLowerCase();
-        css += `  ${cssProperty}: ${value};\n`;
-      }
-    }
-
-    css += '}\n';
-
-    // Add responsive styles
-    css += '\n@media (max-width: 768px) {\n';
-    css += '  .component-styles {\n';
-    css += '    /* Mobile styles */\n';
-    css += '  }\n';
-    css += '}\n';
-
-    return css;
-  }
-
-  private generateTailwind(node: FigmaNode, styles: StyleProperties): string {
-    return this.generateTailwindClasses(node);
+/* Komponens alapstílusok */
+.${this.sanitizeComponentName(node.name).toLowerCase()} {
+  @apply ${classes};
+}`;
   }
 
   private generateTailwindClasses(node: FigmaNode): string {
     const classes: string[] = [];
 
     // Layout
-    if (node.layoutMode) {
-      classes.push('flex');
-      classes.push(node.layoutMode === 'HORIZONTAL' ? 'flex-row' : 'flex-col');
+    if (node.layoutMode === 'HORIZONTAL') {
+      classes.push('flex', 'flex-row');
+    } else if (node.layoutMode === 'VERTICAL') {
+      classes.push('flex', 'flex-col');
+    }
 
-      if (node.itemSpacing) {
-        const spacing = this.convertToTailwindSpacing(node.itemSpacing);
-        classes.push(`gap-${spacing}`);
-      }
+    // Spacing
+    if (node.itemSpacing) {
+      const gap = this.pxToTailwindSpacing(node.itemSpacing);
+      classes.push(`gap-${gap}`);
     }
 
     // Padding
-    if (node.paddingLeft || node.paddingRight || node.paddingTop || node.paddingBottom) {
-      const padding = Math.max(
-        node.paddingLeft || 0,
-        node.paddingRight || 0,
-        node.paddingTop || 0,
-        node.paddingBottom || 0
-      );
-      const spacing = this.convertToTailwindSpacing(padding);
-      classes.push(`p-${spacing}`);
+    if (node.paddingLeft) classes.push(`pl-${this.pxToTailwindSpacing(node.paddingLeft)}`);
+    if (node.paddingRight) classes.push(`pr-${this.pxToTailwindSpacing(node.paddingRight)}`);
+    if (node.paddingTop) classes.push(`pt-${this.pxToTailwindSpacing(node.paddingTop)}`);
+    if (node.paddingBottom) classes.push(`pb-${this.pxToTailwindSpacing(node.paddingBottom)}`);
+
+    // Size
+    if (node.absoluteBoundingBox) {
+      const { width, height } = node.absoluteBoundingBox;
+      classes.push(`w-[${width}px]`, `h-[${height}px]`);
+    }
+
+    // Background color
+    if (node.backgroundColor) {
+      classes.push(this.colorToTailwind(node.backgroundColor));
     }
 
     // Border radius
     if (node.cornerRadius) {
-      const radius = this.convertToTailwindRadius(node.cornerRadius);
-      classes.push(`rounded-${radius}`);
+      classes.push(this.borderRadiusToTailwind(node.cornerRadius));
     }
 
-    // Background color
-    if (node.backgroundColor || (node.fills && node.fills.length > 0)) {
-      classes.push('bg-gray-100'); // Default, should be calculated from actual color
-    }
-
-    // Typography
-    if (node.type === 'TEXT') {
-      classes.push('text-base', 'font-normal');
-    }
-
-    // Interactive elements
-    if (node.name.toLowerCase().includes('button')) {
-      classes.push('cursor-pointer', 'hover:opacity-80', 'transition-opacity');
+    // Text styles
+    if (node.type === 'TEXT' && node.style) {
+      if (node.style.fontSize) {
+        classes.push(this.fontSizeToTailwind(node.style.fontSize));
+      }
     }
 
     return classes.join(' ');
   }
 
-  private convertToTailwindSpacing(pixels: number): string {
-    // Convert pixels to Tailwind spacing scale
-    if (pixels <= 4) return '1';
-    if (pixels <= 8) return '2';
-    if (pixels <= 12) return '3';
-    if (pixels <= 16) return '4';
-    if (pixels <= 20) return '5';
-    if (pixels <= 24) return '6';
-    if (pixels <= 32) return '8';
-    if (pixels <= 40) return '10';
-    if (pixels <= 48) return '12';
-    return '16';
-  }
-
-  private convertToTailwindRadius(pixels: number): string {
-    if (pixels <= 2) return 'sm';
-    if (pixels <= 4) return '';
-    if (pixels <= 6) return 'md';
-    if (pixels <= 8) return 'lg';
-    if (pixels <= 12) return 'xl';
-    if (pixels <= 16) return '2xl';
-    return '3xl';
-  }
-
-  private generateTypeScript(analysis: ComponentAnalysis): string {
-    let typescript = '// Type definitions\n\n';
-
-    typescript += 'export interface ComponentProps {\n';
-    typescript += '  className?: string;\n';
-
-    if (analysis.hasInteractivity) {
-      typescript += '  onClick?: () => void;\n';
-    }
-
-    if (analysis.type === 'button') {
-      typescript += '  disabled?: boolean;\n';
-      typescript += '  variant?: "primary" | "secondary" | "outline";\n';
-    }
-
-    typescript += '}\n\n';
-
-    typescript += 'export interface ComponentState {\n';
-    typescript += '  // Add state types here\n';
-    typescript += '}\n';
-
-    return typescript;
-  }
-
-  private generateAccessibilityReport(node: FigmaNode, jsx: string): AccessibilityReport {
-    const issues: AccessibilityIssue[] = [];
+  // Accessibility elemzés
+  private analyzeAccessibility(node: FigmaNode): AccessibilityReport {
+    const issues: any[] = [];
     const suggestions: string[] = [];
+    let score = 100;
 
-    // Check for missing alt text on images
-    if (node.type === 'RECTANGLE' && node.fills && node.fills.some(fill => fill.imageRef)) {
+    // Képek alt text ellenőrzése
+    if (this.isImage(node)) {
       issues.push({
         type: 'error',
-        message: 'Image missing alt text',
-        element: 'img',
-        fix: 'Add alt attribute with descriptive text'
+        message: 'Kép hiányzó alt szöveg',
+        element: node.name,
+        fix: 'Adj hozzá alt attribútumot leíró szöveggel'
       });
+      score -= 15;
     }
 
-    // Check for button accessibility
-    if (node.name.toLowerCase().includes('button')) {
-      if (!jsx.includes('aria-label') && !jsx.includes('aria-labelledby')) {
+    // Szöveg kontraszt ellenőrzése
+    if (node.type === 'TEXT') {
+      const contrastRatio = this.calculateContrastRatio(node);
+      if (contrastRatio < 4.5) {
         issues.push({
           type: 'warning',
-          message: 'Button missing accessible label',
-          element: 'button',
-          fix: 'Add aria-label or aria-labelledby attribute'
+          message: 'Alacsony szöveg kontraszt',
+          element: node.name,
+          fix: 'Növeld a szöveg és háttér közötti kontrasztot'
         });
+        score -= 10;
       }
     }
 
-    // Check for text contrast
-    if (node.type === 'TEXT' && node.style) {
-      suggestions.push('Verify text contrast meets WCAG AA standards (4.5:1 ratio)');
+    // Interaktív elemek ellenőrzése
+    if (this.isInteractiveElement(node)) {
+      suggestions.push('Biztosítsd a billentyűzetes navigáció támogatását');
+      suggestions.push('Adj hozzá ARIA címkéket a képernyőolvasókhoz');
+      suggestions.push('Használj megfelelő focus állapotokat');
     }
 
-    // Check for focus management
-    if (node.name.toLowerCase().includes('input')) {
-      suggestions.push('Ensure proper focus management and keyboard navigation');
+    // Címsor hierarchia ellenőrzése
+    if (this.isHeading(node)) {
+      suggestions.push('Ellenőrizd a címsor hierarchiát (h1, h2, h3...)');
     }
 
-    // Calculate accessibility score
-    const errorCount = issues.filter(issue => issue.type === 'error').length;
-    const warningCount = issues.filter(issue => issue.type === 'warning').length;
-
-    let score = 100;
-    score -= errorCount * 20;
-    score -= warningCount * 10;
-    score = Math.max(0, score);
-
-    // Determine WCAG compliance
-    let wcagCompliance: 'AA' | 'A' | 'Non-compliant' = 'AA';
-    if (errorCount > 0) {
-      wcagCompliance = 'Non-compliant';
-    } else if (warningCount > 2) {
-      wcagCompliance = 'A';
+    // Egyéni kód accessibility javítások
+    if (this.customCode.jsx || this.customCode.css) {
+      suggestions.push('Ellenőrizd az egyéni kód accessibility megfelelőségét');
+      suggestions.push('Teszteld a komponenst képernyőolvasóval');
     }
 
     return {
-      score,
+      score: Math.max(0, score),
       issues,
       suggestions,
-      wcagCompliance
+      wcagCompliance: score >= 80 ? 'AA' : score >= 60 ? 'A' : 'Non-compliant'
     };
   }
 
-  private generateResponsiveBreakpoints(node: FigmaNode, styles: StyleProperties): ResponsiveBreakpoints {
-    const baseWidth = node.absoluteBoundingBox?.width || 320;
-
-    // Generate responsive CSS
-    const mobile = this.generateResponsiveCSS(styles, 'mobile');
-    const tablet = this.generateResponsiveCSS(styles, 'tablet');
-    const desktop = this.generateResponsiveCSS(styles, 'desktop');
+  // Responsive design elemzés
+  private analyzeResponsive(node: FigmaNode): ResponsiveBreakpoints {
+    const hasFlexLayout = node.layoutMode === 'HORIZONTAL' || node.layoutMode === 'VERTICAL';
+    const hasConstraints = node.constraints?.horizontal !== 'LEFT' || node.constraints?.vertical !== 'TOP';
+    const hasResponsiveDesign = hasFlexLayout || hasConstraints;
 
     return {
-      mobile,
-      tablet,
-      desktop,
-      hasResponsiveDesign: baseWidth > 768
+      mobile: this.generateResponsiveCSS(node, 'mobile'),
+      tablet: this.generateResponsiveCSS(node, 'tablet'),
+      desktop: this.generateResponsiveCSS(node, 'desktop'),
+      hasResponsiveDesign
     };
   }
 
-  private generateResponsiveCSS(styles: StyleProperties, breakpoint: 'mobile' | 'tablet' | 'desktop'): string {
-    const responsiveStyles = { ...styles };
-
-    // Adjust styles based on breakpoint
-    if (breakpoint === 'mobile') {
-      if (responsiveStyles.fontSize) {
-        const fontSize = parseInt(responsiveStyles.fontSize);
-        responsiveStyles.fontSize = `${Math.max(14, fontSize * 0.8)}px`;
+  // Segédfüggvények
+  private findNodeById(id: string): FigmaNode | null {
+    const search = (node: FigmaNode): FigmaNode | null => {
+      if (node.id === id) return node;
+      if (node.children) {
+        for (const child of node.children) {
+          const found = search(child);
+          if (found) return found;
+        }
       }
-      if (responsiveStyles.padding) {
-        responsiveStyles.padding = '8px';
-      }
-    }
-
-    let css = '';
-    for (const [property, value] of Object.entries(responsiveStyles)) {
-      if (value) {
-        const cssProperty = property.replace(/([A-Z])/g, '-$1').toLowerCase();
-        css += `  ${cssProperty}: ${value};\n`;
-      }
-    }
-
-    return css;
+      return null;
+    };
+    return search(this.figmaData.document);
   }
 
-  private calculateAccuracy(analysis: ComponentAnalysis): number {
-    let accuracy = 85; // Base accuracy
-
-    // Adjust based on complexity
-    if (analysis.complexity === 'simple') accuracy += 10;
-    if (analysis.complexity === 'complex') accuracy -= 15;
-
-    // Adjust based on component type
-    if (analysis.type === 'text') accuracy += 5;
-    if (analysis.type === 'complex') accuracy -= 10;
-
-    // Adjust based on features
-    if (analysis.hasInteractivity) accuracy -= 5;
-    if (analysis.hasVariants) accuracy -= 10;
-
-    return Math.max(60, Math.min(95, accuracy));
-  }
-
-  private integrateCustomJSX(baseJSX: string, customJSX?: string, customImports?: string): string {
-    if (!customJSX && !customImports) return baseJSX;
-
-    let integratedJSX = baseJSX;
-
-    // Add custom imports at the top
-    if (customImports) {
-      const importSection = customImports.trim() + '\n';
-      if (integratedJSX.includes('import React')) {
-        integratedJSX = integratedJSX.replace(/import React[^;]*;\n/, `import React from 'react';\n${importSection}`);
-      } else {
-        integratedJSX = importSection + integratedJSX;
+  private findMainFrames(node: FigmaNode): FigmaNode[] {
+    const frames: FigmaNode[] = [];
+    
+    const traverse = (currentNode: FigmaNode) => {
+      if (currentNode.type === 'FRAME' && currentNode.children && currentNode.children.length > 0) {
+        frames.push(currentNode);
       }
-    }
-
-    // Integrate custom JSX logic
-    if (customJSX) {
-      // Find the component function and add custom logic
-      const functionMatch = integratedJSX.match(/(const \w+ = \([^)]*\) => \{)/);
-      if (functionMatch) {
-        const customLogic = `\n  // Custom logic\n${customJSX.split('\n').map(line => `  ${line}`).join('\n')}\n`;
-        integratedJSX = integratedJSX.replace(functionMatch[1], functionMatch[1] + customLogic);
+      if (currentNode.children) {
+        currentNode.children.forEach(traverse);
       }
-    }
+    };
 
-    return integratedJSX;
+    traverse(node);
+    return frames;
   }
 
-  private integrateCustomCSS(baseCSS: string, customCSS?: string, customAdvanced?: string): string {
-    if (!customCSS && !customAdvanced) return baseCSS;
-
-    let integratedCSS = baseCSS;
-
-    // Add custom CSS
-    if (customCSS) {
-      integratedCSS += '\n\n/* Custom CSS */\n' + customCSS;
-    }
-
-    // Add advanced CSS features
-    if (customAdvanced) {
-      integratedCSS += '\n\n/* Advanced CSS Features */\n' + customAdvanced;
-    }
-
-    return integratedCSS;
+  private sanitizeComponentName(name: string): string {
+    return name
+      .replace(/[^a-zA-Z0-9]/g, '')
+      .replace(/^[0-9]/, 'Component$&')
+      .replace(/^./, str => str.toUpperCase()) || 'Component';
   }
 
-  private integrateCustomUtilities(baseTypeScript: string, customUtilities: string): string {
-    return baseTypeScript + '\n\n// Custom Utilities\n' + customUtilities;
+  private colorToCSS(color: any, opacity?: number): string {
+    const { r, g, b, a } = color;
+    const alpha = opacity !== undefined ? opacity : (a !== undefined ? a : 1);
+    return `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${alpha})`;
   }
 
-  private generateSuggestedProps(analysis: ComponentAnalysis): Array<{name: string, type: string, required: boolean}> {
-    const props: Array<{name: string, type: string, required: boolean}> = [];
+  private colorToTailwind(color: any): string {
+    const { r, g, b } = color;
+    
+    // Egyszerűsített színkonverzió
+    if (r > 0.9 && g > 0.9 && b > 0.9) return 'bg-white';
+    if (r < 0.1 && g < 0.1 && b < 0.1) return 'bg-black';
+    if (r > 0.8 && g < 0.3 && b < 0.3) return 'bg-red-500';
+    if (r < 0.3 && g > 0.8 && b < 0.3) return 'bg-green-500';
+    if (r < 0.3 && g < 0.3 && b > 0.8) return 'bg-blue-500';
+    
+    return 'bg-gray-500';
+  }
 
-    props.push({ name: 'className', type: 'string', required: false });
+  private pxToTailwindSpacing(px: number): string {
+    const spacing = Math.round(px / 4);
+    if (spacing <= 0) return '0';
+    if (spacing <= 96) return spacing.toString();
+    return `[${px}px]`;
+  }
 
-    if (analysis.hasInteractivity) {
-      props.push({ name: 'onClick', type: '() => void', required: false });
+  private borderRadiusToTailwind(radius: number): string {
+    if (radius <= 2) return 'rounded-sm';
+    if (radius <= 4) return 'rounded';
+    if (radius <= 6) return 'rounded-md';
+    if (radius <= 8) return 'rounded-lg';
+    if (radius <= 12) return 'rounded-xl';
+    if (radius <= 16) return 'rounded-2xl';
+    return `rounded-[${radius}px]`;
+  }
+
+  private fontSizeToTailwind(fontSize: number): string {
+    if (fontSize <= 12) return 'text-xs';
+    if (fontSize <= 14) return 'text-sm';
+    if (fontSize <= 16) return 'text-base';
+    if (fontSize <= 18) return 'text-lg';
+    if (fontSize <= 20) return 'text-xl';
+    if (fontSize <= 24) return 'text-2xl';
+    if (fontSize <= 30) return 'text-3xl';
+    return `text-[${fontSize}px]`;
+  }
+
+  private getHtmlTag(node: FigmaNode): string {
+    switch (node.type) {
+      case 'TEXT': return this.isHeading(node) ? 'h2' : 'span';
+      case 'FRAME': return 'div';
+      case 'RECTANGLE': return this.isImage(node) ? 'img' : 'div';
+      case 'COMPONENT':
+      case 'INSTANCE': return 'div';
+      default: return 'div';
+    }
+  }
+
+  private isImage(node: FigmaNode): boolean {
+    return node.fills?.some(fill => fill.type === 'IMAGE') || false;
+  }
+
+  private isInteractiveElement(node: FigmaNode): boolean {
+    const name = node.name.toLowerCase();
+    return name.includes('button') || 
+           name.includes('link') ||
+           name.includes('input') ||
+           name.includes('click');
+  }
+
+  private isHeading(node: FigmaNode): boolean {
+    if (node.type !== 'TEXT') return false;
+    const name = node.name.toLowerCase();
+    return name.includes('title') || 
+           name.includes('heading') || 
+           name.includes('header') ||
+           (node.style?.fontSize && node.style.fontSize > 20);
+  }
+
+  private calculateContrastRatio(node: FigmaNode): number {
+    // Egyszerűsített kontraszt számítás
+    // Valós implementációban WCAG kontrasztszámítást használnánk
+    return 4.5; // Placeholder
+  }
+
+  private generateImports(node: FigmaNode): string {
+    const imports = ['import React from "react";'];
+    
+    if (this.options.typescript) {
+      // TypeScript típusok importálása szükség esetén
+    }
+    
+    return imports.join('\n');
+  }
+
+  private generatePropsInterface(props: any[], componentName: string): string {
+    if (props.length === 0) return '';
+    
+    return `interface ${componentName}Props {
+  ${props.map(p => `${p.name}${p.optional ? '?' : ''}: ${p.type};`).join('\n  ')}
+}
+
+`;
+  }
+
+  private extractProps(node: FigmaNode): Array<{name: string, type: string, optional: boolean}> {
+    const props = [];
+    
+    if (node.type === 'TEXT' && node.characters) {
+      props.push({ name: 'children', type: 'React.ReactNode', optional: true });
+    }
+    
+    if (this.isImage(node)) {
+      props.push({ name: 'src', type: 'string', optional: false });
+      props.push({ name: 'alt', type: 'string', optional: false });
     }
 
-    if (analysis.type === 'button') {
-      props.push({ name: 'disabled', type: 'boolean', required: false });
-      props.push({ name: 'variant', type: '"primary" | "secondary" | "outline"', required: false });
-    }
-
-    if (analysis.type === 'input') {
-      props.push({ name: 'value', type: 'string', required: false });
-      props.push({ name: 'onChange', type: '(value: string) => void', required: false });
-      props.push({ name: 'placeholder', type: 'string', required: false });
-    }
-
+    props.push({ name: 'className', type: 'string', optional: true });
+    
     return props;
   }
 
-  private generateWarnings(analysis: ComponentAnalysis, customCode?: any): string[] {
-    const warnings: string[] = [];
-
-    if (analysis.complexity === 'complex') {
-      warnings.push('Complex component may require manual adjustments');
+  private generateClassName(node: FigmaNode): string {
+    if (this.options.styling === 'tailwind') {
+      return this.generateTailwindClasses(node);
     }
+    return node.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+  }
 
-    if (analysis.hasVariants) {
-      warnings.push('Component variants detected - verify all states are handled');
+  private generateInlineStyles(node: FigmaNode): string {
+    if (this.options.styling === 'tailwind') return '';
+    
+    const styles = this.extractAllStyles(node);
+    const styleEntries = Object.entries(styles)
+      .map(([key, value]) => `${key}: "${value}"`)
+      .join(', ');
+    
+    return styleEntries ? `{{ ${styleEntries} }}` : '';
+  }
+
+  private generateAttributes(node: FigmaNode): string {
+    const attributes = [];
+    
+    if (this.isImage(node)) {
+      attributes.push('src={src}', 'alt={alt}');
     }
+    
+    return attributes.length > 0 ? ' ' + attributes.join(' ') : '';
+  }
 
-    if (customCode?.jsx && !customCode?.css) {
-      warnings.push('Custom JSX provided without corresponding CSS - styles may be incomplete');
+  private generateHTML(node: FigmaNode, className: string, styles: string, children: string): string {
+    // HTML generálás implementációja
+    return `<!-- HTML implementation -->`;
+  }
+
+  private convertToCSSRules(styles: Record<string, any>, componentName: string): string {
+    const cssRules = Object.entries(styles)
+      .map(([property, value]) => `  ${this.camelToKebab(property)}: ${value};`)
+      .join('\n');
+    
+    return `.${componentName.toLowerCase()} {\n${cssRules}\n}`;
+  }
+
+  private generateCSSModules(cssRules: string): string {
+    return cssRules;
+  }
+
+  private generateStyledComponents(cssRules: string, componentName: string): string {
+    return `import styled from 'styled-components';
+
+export const Styled${componentName} = styled.div\`
+${cssRules.replace(/^\.[^{]+\{/, '').replace(/\}$/, '')}
+\`;`;
+  }
+
+  private generatePlainCSS(cssRules: string, componentName: string): string {
+    return cssRules;
+  }
+
+  private camelToKebab(str: string): string {
+    return str.replace(/([a-z0-9]|(?=[A-Z]))([A-Z])/g, '$1-$2').toLowerCase();
+  }
+
+  private gradientToCSS(fill: any): string {
+    // Gradient konverzió implementációja
+    return 'linear-gradient(90deg, #000 0%, #fff 100%)';
+  }
+
+  private effectToCSS(effect: any): string {
+    if (effect.type === 'DROP_SHADOW') {
+      const { offset, radius, color } = effect;
+      const x = offset?.x || 0;
+      const y = offset?.y || 0;
+      const blur = radius || 0;
+      const colorCSS = color ? this.colorToCSS(color) : 'rgba(0,0,0,0.25)';
+      return `${x}px ${y}px ${blur}px ${colorCSS}`;
     }
+    return '';
+  }
 
-    return warnings;
+  private generateResponsiveCSS(node: FigmaNode, breakpoint: string): string {
+    // Responsive CSS generálás breakpoint alapján
+    return `/* ${breakpoint} responsive styles */`;
+  }
+
+  private generateTypeScript(node: FigmaNode, componentName: string): string {
+    const props = this.extractProps(node);
+    
+    return `export interface ${componentName}Props {
+  ${props.map(p => `${p.name}${p.optional ? '?' : ''}: ${p.type};`).join('\n  ')}
+}
+
+export type ${componentName}Ref = HTMLDivElement;`;
+  }
+
+  private generateMetadata(node: FigmaNode, generationTime: number): ComponentMetadata {
+    return {
+      figmaNodeId: node.id,
+      componentType: this.detectComponentType(node),
+      complexity: this.calculateComplexity(node),
+      estimatedAccuracy: this.estimateAccuracy(node),
+      generationTime,
+      dependencies: this.extractDependencies(node)
+    };
+  }
+
+  private detectComponentType(node: FigmaNode): ComponentMetadata['componentType'] {
+    const name = node.name.toLowerCase();
+    
+    if (name.includes('button')) return 'button';
+    if (name.includes('card')) return 'card';
+    if (name.includes('text') || node.type === 'TEXT') return 'text';
+    if (name.includes('input')) return 'input';
+    if (node.children && node.children.length > 3) return 'layout';
+    
+    return 'complex';
+  }
+
+  private calculateComplexity(node: FigmaNode): ComponentMetadata['complexity'] {
+    let complexity = 0;
+    
+    if (node.children) complexity += node.children.length;
+    if (node.effects && node.effects.length > 0) complexity += 2;
+    if (node.fills && node.fills.length > 1) complexity += 1;
+    
+    // Egyéni kód növeli a komplexitást
+    if (this.customCode.jsx || this.customCode.css || this.customCode.cssAdvanced) {
+      complexity += 1;
+    }
+    
+    if (complexity <= 3) return 'simple';
+    if (complexity <= 8) return 'medium';
+    return 'complex';
+  }
+
+  private estimateAccuracy(node: FigmaNode): number {
+    let accuracy = 85;
+    
+    if (this.calculateComplexity(node) === 'simple') accuracy += 10;
+    if (node.children && node.children.length > 5) accuracy -= 5;
+    
+    const componentType = this.detectComponentType(node);
+    if (['button', 'text', 'card'].includes(componentType)) accuracy += 5;
+    
+    // Egyéni kód javítja a pontosságot
+    if (this.customCode.jsx || this.customCode.css || this.customCode.cssAdvanced) {
+      accuracy += 5;
+    }
+    
+    return Math.min(100, Math.max(70, accuracy));
+  }
+
+  private extractDependencies(node: FigmaNode): string[] {
+    const deps = ['react'];
+    
+    if (this.options.typescript) deps.push('@types/react');
+    if (this.isImage(node)) deps.push('next/image');
+    if (this.options.styling === 'styled-components') deps.push('styled-components');
+    
+    return deps;
   }
 }
